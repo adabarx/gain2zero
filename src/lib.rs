@@ -1,5 +1,10 @@
-use nih_plug::prelude::*;
+#![allow(non_snake_case)]
+use nih_plug::{prelude::*, params::persist};
+use nih_plug_vizia::ViziaState;
 use std::sync::Arc;
+use atomic_float::AtomicF32;
+
+mod editor;
 
 // This is a shortened version of the gain example with most comments removed, check out
 // https://github.com/robbert-vdh/nih-plug/blob/master/plugins/examples/gain/src/lib.rs to get
@@ -8,6 +13,7 @@ use std::sync::Arc;
 struct GainToZero {
     params: Arc<GainToZeroParams>,
     reduction: f32,
+    reduction_readout: Arc<AtomicF32>,
 }
 
 #[derive(Params)]
@@ -16,6 +22,9 @@ struct GainToZeroParams {
     /// these IDs remain constant, you can rename and reorder these fields as you wish. The
     /// parameters are exposed to the host in the same order they were defined. In this case, this
     /// gain parameter is stored as linear gain while the values are displayed in decibels.
+    #[persist = "editor-state"]
+    editor_state: Arc<ViziaState>,
+
     #[id = "gain"]
     pub threshold: FloatParam,
 }
@@ -24,7 +33,8 @@ impl Default for GainToZero {
     fn default() -> Self {
         Self {
             params: Arc::new(GainToZeroParams::default()),
-            reduction: 1.0,
+            reduction: 1.,
+            reduction_readout: Arc::new(AtomicF32::new(1.)),
         }
     }
 }
@@ -32,22 +42,16 @@ impl Default for GainToZero {
 impl Default for GainToZeroParams {
     fn default() -> Self {
         Self {
-            // This gain is stored as linear gain. NIH-plug comes with useful conversion functions
-            // to treat these kinds of parameters as if we were dealing with decibels. Storing this
-            // as decibels is easier to work with, but requires a conversion for every sample.
+            editor_state: editor::default_state(),
             threshold: FloatParam::new(
                 "Threshold",
                 util::db_to_gain(0.0),
                 FloatRange::Skewed {
                     min: util::db_to_gain(-36.0),
                     max: util::db_to_gain(36.0),
-                    // This makes the range appear as if it was linear when displaying the values as
-                    // decibels
                     factor: FloatRange::gain_skew_factor(-36.0, 36.0),
                 },
             )
-            // Because the gain parameter is stored as linear gain instead of storing the value as
-            // decibels, we need logarithmic smoothing
             .with_smoother(SmoothingStyle::Logarithmic(50.0))
             .with_unit(" dB")
             // There are many predefined formatters we can use here. If the gain was stored as
@@ -101,6 +105,14 @@ impl Plugin for GainToZero {
         self.params.clone()
     }
 
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        editor::create(
+            self.params.clone(),
+            self.reduction_readout.clone(),
+            self.params.editor_state.clone(),
+        )
+    }
+
     fn initialize(
         &mut self,
         _audio_io_layout: &AudioIOLayout,
@@ -125,12 +137,12 @@ impl Plugin for GainToZero {
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         for channel_samples in buffer.iter_samples() {
-            // Smoothing is optionally built into the parameters themselves
             let threshold = self.params.threshold.smoothed.next();
 
             for sample in channel_samples {
                 if sample.abs() * self.reduction > threshold {
                     self.reduction = threshold / sample.abs();
+                    self.reduction_readout.store(self.reduction, std::sync::atomic::Ordering::Relaxed)
                 }
                 *sample *= self.reduction;
             }
