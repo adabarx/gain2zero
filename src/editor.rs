@@ -74,7 +74,7 @@ impl IcedEditor for G2Xui {
         Column::new()
             .align_items(Alignment::Center)
             .push(
-                Text::new("gain2x")
+                Text::new("gain2zero")
                     .font(assets::NOTO_SANS_LIGHT)
                     .size(40)
                     .height(50.into())
