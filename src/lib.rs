@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
-use nih_plug::{prelude::*, params::persist};
-use nih_plug_vizia::ViziaState;
+use nih_plug::prelude::*;
+use nih_plug_iced::IcedState;
 use std::sync::Arc;
 use atomic_float::AtomicF32;
 
@@ -12,8 +12,8 @@ mod editor;
 
 struct GainToZero {
     params: Arc<GainToZeroParams>,
-    reduction: f32,
-    reduction_readout: Arc<AtomicF32>,
+    attenuation: f32,
+    attenuation_readout: Arc<AtomicF32>,
 }
 
 #[derive(Params)]
@@ -23,18 +23,21 @@ struct GainToZeroParams {
     /// parameters are exposed to the host in the same order they were defined. In this case, this
     /// gain parameter is stored as linear gain while the values are displayed in decibels.
     #[persist = "editor-state"]
-    editor_state: Arc<ViziaState>,
+    editor_state: Arc<IcedState>,
 
-    #[id = "gain"]
+    #[id = "threshold"]
     pub threshold: FloatParam,
+
+    #[id = "reset"]
+    pub reset: BoolParam,
 }
 
 impl Default for GainToZero {
     fn default() -> Self {
         Self {
             params: Arc::new(GainToZeroParams::default()),
-            reduction: 1.,
-            reduction_readout: Arc::new(AtomicF32::new(1.)),
+            attenuation: 1.,
+            attenuation_readout: Arc::new(AtomicF32::new(1.)),
         }
     }
 }
@@ -52,13 +55,14 @@ impl Default for GainToZeroParams {
                     factor: FloatRange::gain_skew_factor(-36.0, 36.0),
                 },
             )
-            .with_smoother(SmoothingStyle::Logarithmic(50.0))
-            .with_unit(" dB")
-            // There are many predefined formatters we can use here. If the gain was stored as
-            // decibels instead of as a linear gain value, we could have also used the
-            // `.with_step_size(0.1)` function to get internal rounding.
-            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
-            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+                .with_smoother(SmoothingStyle::Logarithmic(50.0))
+                .with_unit(" dB")
+                // There are many predefined formatters we can use here. If the gain was stored as
+                // decibels instead of as a linear gain value, we could have also used the
+                // `.with_step_size(0.1)` function to get internal rounding.
+                .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
+                .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+            reset: BoolParam::new("reset", false),
         }
     }
 }
@@ -108,7 +112,7 @@ impl Plugin for GainToZero {
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
         editor::create(
             self.params.clone(),
-            self.reduction_readout.clone(),
+            self.attenuation_readout.clone(),
             self.params.editor_state.clone(),
         )
     }
@@ -137,14 +141,26 @@ impl Plugin for GainToZero {
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         for channel_samples in buffer.iter_samples() {
-            let threshold = self.params.threshold.smoothed.next();
+            let threshold = self.params.threshold.value();
+            let reset = self.params.reset.value();
 
-            for sample in channel_samples {
-                if sample.abs() * self.reduction > threshold {
-                    self.reduction = threshold / sample.abs();
-                    self.reduction_readout.store(self.reduction, std::sync::atomic::Ordering::Relaxed)
+            if !reset {
+                for sample in channel_samples {
+                    if sample.abs() * self.attenuation > threshold {
+                        self.attenuation = threshold / sample.abs();
+                    }
+                    *sample *= self.attenuation;
                 }
-                *sample *= self.reduction;
+            } else {
+                self.attenuation = 1.;
+            }
+
+            if self.params.editor_state.is_open() {
+                self.attenuation_readout
+                    .store(
+                        util::gain_to_db(self.attenuation),
+                        std::sync::atomic::Ordering::Relaxed,
+                    )
             }
         }
 

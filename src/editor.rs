@@ -1,56 +1,139 @@
 use std::sync::Arc;
 
 use atomic_float::AtomicF32;
-use nih_plug::prelude::Editor;
-use nih_plug_vizia::widgets::{ResizeHandle, ParamSlider};
-use nih_plug_vizia::{create_vizia_editor, ViziaTheming, assets};
-use nih_plug_vizia::vizia::prelude::*;
-use nih_plug_vizia::{ViziaState, vizia::state::Model};
+use nih_plug::prelude::{Editor, GuiContext};
+use nih_plug_iced::*;
+use nih_plug_iced::widgets as nih_widgets;
 
 use crate::GainToZeroParams;
 
-#[derive(Lens)]
-struct Data {
-    params: Arc<GainToZeroParams>,
-    reduction_readout: Arc<AtomicF32>,
-}
-
-impl Model for Data {}
-
-pub(crate) fn default_state() -> Arc<ViziaState> {
-    ViziaState::new(|| (200, 150))
+pub(crate) fn default_state() -> Arc<IcedState> {
+    IcedState::from_size(200, 300)
 }
 
 pub(crate) fn create(
     params: Arc<GainToZeroParams>,
-    reduction_readout: Arc<AtomicF32>,
-    editor_state: Arc<ViziaState>,
+    attentuation_readout: Arc<AtomicF32>,
+    editor_state: Arc<IcedState>,
 ) -> Option<Box<dyn Editor>> {
-    create_vizia_editor(editor_state, ViziaTheming::Custom, move |cx, _| {
-        assets::register_noto_sans_light(cx);
-        assets::register_noto_sans_thin(cx);
-
-        Data {
-            params: params.clone(),
-            reduction_readout: reduction_readout.clone(),
-        }
-        .build(cx);
-
-        ResizeHandle::new(cx);
-
-        VStack::new(cx, |cx| {
-            Label::new(cx, "Gain2Zero")
-                .font_family(vec![FamilyOwned::Name(String::from(assets::NOTO_SANS_THIN))])
-                .font_size(30.)
-                .height(Pixels(50.))
-                .child_top(Stretch(1.))
-                .child_bottom(Pixels(0.));
-
-            Label::new(cx, "Threshold");
-            ParamSlider::new(cx, Data::params, |params| &params.threshold);
-        })
-        .row_between(Pixels(0.))
-        .child_left(Stretch(1.0))
-        .child_right(Stretch(1.0));
-    })
+    create_iced_editor::<G2Xui>(editor_state, (params, attentuation_readout))
 }
+
+struct G2Xui {
+    params: Arc<GainToZeroParams>,
+    context: Arc<dyn GuiContext>,
+    attenuation_readout: Arc<AtomicF32>,
+
+    threshold_slider_state: nih_widgets::param_slider::State,
+    reset_switch_state: nih_widgets::param_slider::State,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Message {
+    ParamUpdate(nih_widgets::ParamMessage),
+}
+
+impl IcedEditor for G2Xui {
+    type Executor = executor::Default;
+    type Message = Message;
+    type InitializationFlags = (Arc<GainToZeroParams>, Arc<AtomicF32>);
+
+    fn new(
+        (params, attenuation_readout): Self::InitializationFlags,
+        context: Arc<dyn GuiContext>,
+    ) -> (Self, Command<Self::Message>) {
+        let editor = G2Xui {
+            params,
+            context,
+            attenuation_readout,
+
+            threshold_slider_state: Default::default(),
+            reset_switch_state: Default::default(),
+        };
+
+        (editor, Command::none())
+    }
+
+    fn context(&self) -> &dyn GuiContext {
+        self.context.as_ref()
+    }
+
+    fn update(
+        &mut self,
+        _window: &mut WindowQueue,
+        message: Self::Message,
+    ) -> Command<Self::Message> {
+        match message {
+            Message::ParamUpdate(message) => self.handle_param_message(message),
+        }
+
+        Command::none()
+    }
+
+    fn view(&mut self) -> Element<'_, Self::Message> {
+        Column::new()
+            .align_items(Alignment::Center)
+            .push(
+                Text::new("gain2x")
+                    .font(assets::NOTO_SANS_LIGHT)
+                    .size(40)
+                    .height(50.into())
+                    .width(Length::Fill)
+                    .horizontal_alignment(alignment::Horizontal::Center)
+                    .vertical_alignment(alignment::Vertical::Bottom),
+            )
+            .push(Space::with_height(10.into()))
+            .push(
+                Text::new("current attenuation")
+                    .font(assets::NOTO_SANS_BOLD)
+                    .height(20.into())
+                    .width(Length::Fill)
+                    .horizontal_alignment(alignment::Horizontal::Center)
+                    .vertical_alignment(alignment::Vertical::Center)
+            )
+            .push(
+                Text::new(format!("{:.1}db", self.attenuation_readout.load(std::sync::atomic::Ordering::Relaxed)))
+                    .height(20.into())
+                    .width(Length::Fill)
+                    .horizontal_alignment(alignment::Horizontal::Center)
+                    .vertical_alignment(alignment::Vertical::Center)
+            )
+            .push(Space::with_height(10.into()))
+            .push(
+                Text::new("threshold")
+                    .font(assets::NOTO_SANS_BOLD)
+                    .height(20.into())
+                    .width(Length::Fill)
+                    .horizontal_alignment(alignment::Horizontal::Center)
+                    .vertical_alignment(alignment::Vertical::Center)
+            )
+            .push(
+                nih_widgets::ParamSlider::new(&mut self.threshold_slider_state, &self.params.threshold)
+                    .map(Message::ParamUpdate),
+            )
+            .push(Space::with_height(10.into()))
+            .push(
+                Text::new("reset attenuation")
+                    .font(assets::NOTO_SANS_BOLD)
+                    .height(20.into())
+                    .width(Length::Fill)
+                    .horizontal_alignment(alignment::Horizontal::Center)
+                    .vertical_alignment(alignment::Vertical::Center)
+            )
+            .push(
+                nih_widgets::ParamSlider::new(&mut self.reset_switch_state, &self.params.reset)
+                    .map(Message::ParamUpdate),
+            )
+            .into()
+    }
+
+    fn background_color(&self) -> Color {
+        nih_plug_iced::Color {
+            r: 0.98,
+            g: 0.98,
+            b: 0.98,
+            a: 1.,
+        }
+    }
+}
+
